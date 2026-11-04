@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- `apply` checks agent caches again right before moving them, as it already did for worktrees and build folders. A cache is skipped when its agent is running, when a program uses the folder, or when it is no longer a plain folder that its adapter lists as regenerable. Before, these checks ran only when the plan was made.
+- `restore` and `purge` accept only real plan ids, and only touch entries inside that plan's quarantine folder. Any other path in a quarantine journal is left alone and reported. The `purge` confirmation now lists the quarantine paths it will delete.
+
 ## 0.3.0
 
 - New adapter: ReversePort. Its tool output, lookup cache, extracted files and reports are regenerable; port plans, blueprints, dossiers and scenes are user data; proof cases, feedback and the engine's state are never touched. Honors `REVERSEPORT_HOME`.
