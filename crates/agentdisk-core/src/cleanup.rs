@@ -18,7 +18,8 @@
 //!   checkpoints, memories, settings and models are never planned.
 //! - Anything changed after the plan was made is skipped at apply time.
 
-use crate::adapters::Class;
+use crate::adapters::{Adapter, Class, Kind, PathEntry};
+use crate::config;
 use crate::git;
 use crate::json::{self, Value};
 use crate::paths::{self, display};
@@ -30,7 +31,7 @@ use crate::util::{self, table};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -263,6 +264,64 @@ pub(crate) fn check_build(
     ))
 }
 
+fn dir_entries(a: &Adapter) -> impl Iterator<Item = &PathEntry> {
+    a.paths
+        .iter()
+        .filter(|e| e.applies_here() && e.kind == Kind::Dir)
+}
+
+fn agent_running(adapter: &Adapter, procs: &[String]) -> bool {
+    adapter.processes.iter().any(|p| process_matches(procs, p))
+}
+
+/// Check an agent-cache item again right before it moves, with the rules
+/// `plan` used: the folder is still a plain folder (not a link) that its
+/// adapter lists as regenerable, not inside another agent folder, the agent
+/// is not running and no process uses it. `users` lists the processes that
+/// use a folder (`sys::processes_using`; tests pass their own).
+fn check_agent_cache(
+    item: &PlanItem,
+    adapters: &[Adapter],
+    procs: &[String],
+    users: fn(&Path) -> Vec<String>,
+) -> Result<(), String> {
+    let meta = fs::symlink_metadata(&item.path).map_err(|_| "no longer exists".to_string())?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err("is no longer a plain folder (now a link or a file)".into());
+    }
+    let adapter = adapters
+        .iter()
+        .find(|a| a.id == item.agent)
+        .ok_or_else(|| format!("agent '{}' is not known; make a new plan", item.agent))?;
+    let k = scan::key(&item.path);
+    let listed = dir_entries(adapter)
+        .filter(|e| e.class == Class::Regenerable)
+        .flat_map(|e| paths::expand(&e.template))
+        .any(|p| scan::key(&p) == k);
+    if !listed {
+        return Err(format!(
+            "{} no longer lists this folder as regenerable",
+            adapter.name
+        ));
+    }
+    let nested = adapters
+        .iter()
+        .flat_map(dir_entries)
+        .flat_map(|e| paths::expand(&e.template))
+        .any(|p| k.starts_with(&format!("{}/", scan::key(&p))));
+    if nested {
+        return Err("inside another agent folder".into());
+    }
+    if agent_running(adapter, procs) {
+        return Err(format!("{} is running", adapter.name));
+    }
+    let users = users(&paths::canon(&item.path));
+    if !users.is_empty() {
+        return Err(format!("in use by {}", users.join(", ")));
+    }
+    Ok(())
+}
+
 pub fn make_plan(report: &Report, opts: &PlanOptions) -> Plan {
     let now = report.generated;
     let procs = sys::process_names();
@@ -355,8 +414,7 @@ pub fn make_plan(report: &Report, opts: &PlanOptions) -> Plan {
         {
             let label = format!("{} {}", a.agent, a.what);
             let adapter = report.adapters.iter().find(|x| x.id == a.adapter);
-            let running =
-                adapter.is_some_and(|ad| ad.processes.iter().any(|p| process_matches(&procs, p)));
+            let running = adapter.is_some_and(|ad| agent_running(ad, &procs));
             let idle = a.totals.idle_days(now).unwrap_or(0);
             let reason = if running {
                 Err(format!("{} is running", a.agent))
@@ -520,6 +578,16 @@ pub fn save(p: &Plan) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Plan ids are what `util::new_id` makes: ASCII letters, digits and `-`.
+/// Anything else (empty, `..`, `/`, `\`) could reach outside the plans or
+/// quarantine folder, so it is refused.
+pub fn check_plan_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("bad plan id".into());
+    }
+    Ok(())
+}
+
 /// Load a plan by id, or the newest plan for `"latest"`.
 pub fn load(id: &str) -> Result<Plan, String> {
     let dir = plans_dir();
@@ -540,9 +608,7 @@ pub fn load(id: &str) -> Result<Plan, String> {
     } else {
         id.to_string()
     };
-    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        return Err("bad plan id".into());
-    }
+    check_plan_id(&id)?;
     let text = fs::read_to_string(dir.join(format!("{id}.json")))
         .map_err(|_| format!("plan '{id}' not found"))?;
     plan_from_json(&json::parse(&text)?)
@@ -641,6 +707,7 @@ fn journal_path(plan_id: &str) -> PathBuf {
 }
 
 fn write_journal(plan_id: &str, entries: &[JournalEntry]) -> io::Result<()> {
+    check_plan_id(plan_id).map_err(io::Error::other)?;
     let v: Vec<Value> = entries
         .iter()
         .map(|e| {
@@ -659,6 +726,9 @@ fn write_journal(plan_id: &str, entries: &[JournalEntry]) -> io::Result<()> {
 }
 
 pub fn read_journal(plan_id: &str) -> Vec<JournalEntry> {
+    if check_plan_id(plan_id).is_err() {
+        return Vec::new();
+    }
     let Ok(text) = fs::read_to_string(journal_path(plan_id)) else {
         return Vec::new();
     };
@@ -690,6 +760,7 @@ pub fn quarantined_plans() -> Vec<String> {
             r.flatten()
                 .filter(|e| e.path().join("journal.json").exists())
                 .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|id| check_plan_id(id).is_ok())
                 .collect()
         })
         .unwrap_or_default();
@@ -698,7 +769,12 @@ pub fn quarantined_plans() -> Vec<String> {
 }
 
 /// Re-check an item right before moving it.
-fn recheck(item: &PlanItem, procs: &[String], threads: usize) -> Result<(), String> {
+fn recheck(
+    item: &PlanItem,
+    procs: &[String],
+    adapters: &[Adapter],
+    threads: usize,
+) -> Result<(), String> {
     if !item.path.exists() {
         return Err("no longer exists".into());
     }
@@ -741,7 +817,7 @@ fn recheck(item: &PlanItem, procs: &[String], threads: usize) -> Result<(), Stri
             procs,
         )
         .map(|_| ()),
-        ItemKind::AgentCache => Ok(()),
+        ItemKind::AgentCache => check_agent_cache(item, adapters, procs, sys::processes_using),
     }
 }
 
@@ -754,6 +830,7 @@ pub struct ApplyOutcome {
 /// Move every still-safe item into quarantine. With `dry_run`, only re-check.
 pub fn apply(plan: &Plan, dry_run: bool) -> ApplyOutcome {
     let procs = sys::process_names();
+    let (adapters, _) = scan::load_adapters(&config::load().adapters);
     let threads = size::default_threads();
     let mut out = ApplyOutcome::default();
     let mut journal = read_journal(&plan.id);
@@ -768,7 +845,7 @@ pub fn apply(plan: &Plan, dry_run: bool) -> ApplyOutcome {
                 .push((item.path.clone(), "already in quarantine".into()));
             continue;
         }
-        if let Err(e) = recheck(item, &procs, threads) {
+        if let Err(e) = recheck(item, &procs, &adapters, threads) {
             out.skipped.push((item.path.clone(), e));
             continue;
         }
@@ -836,16 +913,81 @@ pub fn apply(plan: &Plan, dry_run: bool) -> ApplyOutcome {
     out
 }
 
+/// `apply` names entries `<NNN>-<name>` (`{idx:03}-{name}`).
+fn is_entry_name(name: &str) -> bool {
+    let digits = name.bytes().take_while(u8::is_ascii_digit).count();
+    digits >= 3 && name.as_bytes().get(digits) == Some(&b'-')
+}
+
+/// A journal entry may only be restored or purged when its quarantine path
+/// is an entry `apply` made for this plan: `<quarantine>/<plan>/<NNN>-<name>`,
+/// or `<parent of original>/.agentdisk-quarantine/<plan>-<NNN>-<name>` when
+/// the item was on another volume. Folders are compared after resolving
+/// links, so a `..` or a link that leads elsewhere counts as outside, and the
+/// entry itself must not be a link.
+fn check_in_quarantine(plan_id: &str, e: &JournalEntry) -> Result<(), String> {
+    check_plan_id(plan_id)?;
+    let q = &e.quarantine;
+    let outside = || {
+        format!(
+            "{}: not inside the quarantine folder of plan {plan_id}; left as it is",
+            display(q)
+        )
+    };
+    if !q.is_absolute()
+        || q.components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Err(outside());
+    }
+    let (Some(parent), Some(name)) = (q.parent(), q.file_name().and_then(|n| n.to_str())) else {
+        return Err(outside());
+    };
+    let meta = fs::symlink_metadata(q).map_err(|err| format!("{}: {err}", display(q)))?;
+    if meta.file_type().is_symlink() {
+        return Err(outside());
+    }
+    let Ok(parent) = fs::canonicalize(parent) else {
+        return Err(outside());
+    };
+    let in_plan_folder = is_entry_name(name)
+        && fs::canonicalize(quarantine_dir().join(plan_id))
+            .is_ok_and(|root| scan::key(&root) == scan::key(&parent));
+    let next_to_original = parent
+        .file_name()
+        .is_some_and(|n| n == ".agentdisk-quarantine")
+        && name
+            .strip_prefix(&format!("{plan_id}-"))
+            .is_some_and(is_entry_name)
+        && match (parent.parent(), e.original.parent().map(fs::canonicalize)) {
+            (Some(pp), Some(Ok(op))) => scan::key(pp) == scan::key(&op),
+            _ => false,
+        };
+    if in_plan_folder || next_to_original {
+        Ok(())
+    } else {
+        Err(outside())
+    }
+}
+
 /// Move quarantined items of a plan back. Returns (restored, problems).
 pub fn restore(plan_id: &str) -> (Vec<JournalEntry>, Vec<String>) {
-    let mut journal = read_journal(plan_id);
     let mut done = Vec::new();
     let mut problems = Vec::new();
+    if let Err(e) = check_plan_id(plan_id) {
+        problems.push(e);
+        return (done, problems);
+    }
+    let mut journal = read_journal(plan_id);
     if journal.is_empty() {
         problems.push(format!("nothing in quarantine for plan '{plan_id}'"));
         return (done, problems);
     }
     for e in journal.iter_mut().filter(|e| e.state == "quarantined") {
+        if let Err(why) = check_in_quarantine(plan_id, e) {
+            problems.push(why);
+            continue;
+        }
         if e.original.exists() {
             problems.push(format!(
                 "{} exists again; left the copy in {}",
@@ -871,22 +1013,34 @@ pub fn restore(plan_id: &str) -> (Vec<JournalEntry>, Vec<String>) {
     (done, problems)
 }
 
-/// Quarantined entries older than `min_days` (all plans, or one).
-pub fn purge_candidates(plan: Option<&str>, min_days: u64) -> Vec<(String, JournalEntry)> {
+/// (entries `purge` may delete with their plan id, entries left out and why).
+pub type PurgeList = (Vec<(String, JournalEntry)>, Vec<String>);
+
+/// Quarantined entries older than `min_days` (all plans, or one). Entries
+/// whose quarantine path is not inside their plan's quarantine are left out
+/// and reported. A bad plan id is an error.
+pub fn purge_candidates(plan: Option<&str>, min_days: u64) -> Result<PurgeList, String> {
     let now = size::now_secs();
     let ids = match plan {
-        Some(p) => vec![p.to_string()],
+        Some(p) => {
+            check_plan_id(p)?;
+            vec![p.to_string()]
+        }
         None => quarantined_plans(),
     };
     let mut out = Vec::new();
+    let mut refused = Vec::new();
     for id in ids {
         for e in read_journal(&id) {
             if e.state == "quarantined" && now.saturating_sub(e.moved_at) >= min_days * 86_400 {
-                out.push((id.clone(), e));
+                match check_in_quarantine(&id, &e) {
+                    Ok(()) => out.push((id.clone(), e)),
+                    Err(why) => refused.push(why),
+                }
             }
         }
     }
-    out
+    Ok((out, refused))
 }
 
 /// Permanently delete quarantined entries. Returns (freed bytes, problems).
@@ -895,6 +1049,12 @@ pub fn purge(entries: &[(String, JournalEntry)]) -> (u64, Vec<String>) {
     let mut problems = Vec::new();
     let mut by_plan: std::collections::BTreeMap<String, Vec<PathBuf>> = Default::default();
     for (id, e) in entries {
+        // Checked again here: the journal may have changed since the list
+        // was shown, and only quarantine entries may ever be deleted.
+        if let Err(why) = check_in_quarantine(id, e) {
+            problems.push(why);
+            continue;
+        }
         // For worktrees, find git's admin folder (<repo>/.git/worktrees/<name>)
         // before deleting, so only *this* record is removed. Running a global
         // `git worktree prune` could drop records of other quarantined
@@ -1036,6 +1196,158 @@ mod tests {
         let mut w = base;
         w.orphan = true;
         assert!(check_worktree(&w, now, 7).is_err());
+    }
+
+    /// An adapter whose folders live under `root`: a regenerable `cache`, a
+    /// regenerable `history/tmp` inside the user-data `history`.
+    fn fake_adapter(root: &Path) -> Adapter {
+        let r = paths::slashed(root);
+        crate::adapters::parse_adapter(&format!(
+            r#"
+id = "fake"
+name = "Fake Agent"
+processes = ["fakeagent"]
+
+[[path]]
+id = "cache"
+path = "{r}/cache"
+class = "regenerable"
+
+[[path]]
+id = "history"
+path = "{r}/history"
+class = "user-data"
+
+[[path]]
+id = "history-tmp"
+path = "{r}/history/tmp"
+class = "regenerable"
+"#
+        ))
+        .unwrap()
+    }
+
+    fn cache_item(path: &Path) -> PlanItem {
+        PlanItem {
+            kind: ItemKind::AgentCache,
+            path: path.to_path_buf(),
+            repo: None,
+            agent: "fake".into(),
+            label: "Fake Agent cache".into(),
+            reason: String::new(),
+            bytes: 1,
+            newest_mtime: u64::MAX,
+        }
+    }
+
+    fn nobody(_: &Path) -> Vec<String> {
+        Vec::new()
+    }
+
+    #[test]
+    fn apply_checks_agent_caches_again() {
+        let root = paths::canon(&crate::testutil::temp_dir("recheck-cache"));
+        let cache = root.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("log"), b"x").unwrap();
+        fs::create_dir_all(root.join("history/tmp")).unwrap();
+        let adapters = vec![fake_adapter(&root)];
+        let item = cache_item(&cache);
+
+        // All clear: the same item passes.
+        assert_eq!(check_agent_cache(&item, &adapters, &[], nobody), Ok(()));
+        assert_eq!(recheck(&item, &[], &adapters, 1), Ok(()));
+
+        // The agent was started after the plan was made.
+        let err = recheck(&item, &["fakeagent".into()], &adapters, 1).unwrap_err();
+        assert!(err.contains("Fake Agent is running"), "{err}");
+
+        // A process works in the folder.
+        let err =
+            check_agent_cache(&item, &adapters, &[], |_| vec!["vim (pid 42)".into()]).unwrap_err();
+        assert!(err.contains("in use by vim (pid 42)"), "{err}");
+
+        // An agent agentdisk does not know (or a hand-made plan).
+        let mut unknown = item.clone();
+        unknown.agent = "nobody".into();
+        let err = recheck(&unknown, &[], &adapters, 1).unwrap_err();
+        assert!(err.contains("not known"), "{err}");
+
+        // A folder the adapter does not list as regenerable.
+        let err = recheck(&cache_item(&root.join("history")), &[], &adapters, 1).unwrap_err();
+        assert!(err.contains("no longer lists"), "{err}");
+
+        // A regenerable folder inside another agent folder.
+        let err = recheck(&cache_item(&root.join("history/tmp")), &[], &adapters, 1).unwrap_err();
+        assert!(err.contains("inside another agent folder"), "{err}");
+
+        // Replaced by a link.
+        #[cfg(unix)]
+        {
+            let elsewhere = root.join("elsewhere");
+            fs::create_dir_all(&elsewhere).unwrap();
+            fs::rename(&cache, root.join("cache-old")).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &cache).unwrap();
+            let err = recheck(&item, &[], &adapters, 1).unwrap_err();
+            assert!(err.contains("no longer a plain folder"), "{err}");
+            fs::remove_file(&cache).unwrap();
+            fs::rename(root.join("cache-old"), &cache).unwrap();
+        }
+
+        // Gone.
+        fs::remove_dir_all(&cache).unwrap();
+        let err = recheck(&item, &[], &adapters, 1).unwrap_err();
+        assert!(err.contains("no longer exists"), "{err}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The real `processes_using` (Linux only) sees a process whose working
+    /// directory is the cache.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_skips_agent_cache_a_process_uses() {
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let root = paths::canon(&crate::testutil::temp_dir("recheck-busy"));
+        let cache = root.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let adapters = vec![fake_adapter(&root)];
+        let item = cache_item(&cache);
+        assert_eq!(recheck(&item, &[], &adapters, 1), Ok(()));
+        let Ok(child) = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&cache)
+            .spawn()
+        else {
+            eprintln!("no `sleep` here; skipping");
+            return;
+        };
+        let child = Kill(child);
+        let err = recheck(&item, &[], &adapters, 1).unwrap_err();
+        assert!(err.contains("in use by sleep"), "{err}");
+        drop(child);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn plan_ids_are_checked() {
+        for good in ["20261018-a1b2c3", "latest"] {
+            assert_eq!(check_plan_id(good), Ok(()));
+        }
+        for bad in [
+            "", "..", "../x", "..\\x", "a/b", "a\\b", "x.json", "C:", " x",
+        ] {
+            assert!(check_plan_id(bad).is_err(), "{bad}");
+        }
+        assert!(read_journal("../x").is_empty());
+        assert!(load("../x").is_err());
+        assert!(is_entry_name("000-node_modules") && is_entry_name("1234-x"));
+        assert!(!is_entry_name("journal.json") && !is_entry_name("12-x") && !is_entry_name("000"));
     }
 
     #[test]

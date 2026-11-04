@@ -382,6 +382,7 @@ fn cmd_restore(rest: &[String]) -> Result<ExitCode, String> {
             ExitCode::SUCCESS
         });
     }
+    cleanup::check_plan_id(&a.pos[0])?;
     let (done, problems) = cleanup::restore(&a.pos[0]);
     println!("Restored {} item(s).", done.len());
     for d in &done {
@@ -404,10 +405,24 @@ fn cmd_purge(rest: &[String]) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
     let days = a.num("older-than")?.unwrap_or(7);
-    let list = cleanup::purge_candidates(a.one("plan"), days);
+    let (list, refused) = cleanup::purge_candidates(a.one("plan"), days)?;
+    let status = |problems: bool| {
+        if problems {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        }
+    };
+    for p in &refused {
+        eprintln!("  problem: {p}");
+    }
     if list.is_empty() {
-        println!("Nothing in quarantine is older than {days} day(s).");
-        return Ok(ExitCode::SUCCESS);
+        if refused.is_empty() {
+            println!("Nothing in quarantine is older than {days} day(s).");
+        } else {
+            println!("Nothing was deleted.");
+        }
+        return Ok(status(!refused.is_empty()));
     }
     let total: u64 = list.iter().map(|(_, e)| e.bytes).sum();
     println!(
@@ -416,10 +431,14 @@ fn cmd_purge(rest: &[String]) -> Result<ExitCode, String> {
         human(total)
     );
     for (_, e) in &list {
-        println!("  {}", display(&e.original));
+        println!(
+            "  {}  (was {})",
+            display(&e.quarantine),
+            display(&e.original)
+        );
     }
     if a.has("dry-run") {
-        return Ok(ExitCode::SUCCESS);
+        return Ok(status(!refused.is_empty()));
     }
     if !human_confirms("permanent deletion", "delete")? {
         println!("Cancelled. Nothing changed.");
@@ -430,11 +449,7 @@ fn cmd_purge(rest: &[String]) -> Result<ExitCode, String> {
     for p in &problems {
         eprintln!("  problem: {p}");
     }
-    Ok(if problems.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    })
+    Ok(status(!problems.is_empty() || !refused.is_empty()))
 }
 
 fn cmd_compact(rest: &[String]) -> Result<ExitCode, String> {
