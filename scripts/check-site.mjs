@@ -100,6 +100,11 @@ try {
       const response=await fetch('https://api.github.com/repos/'+process.env.GITHUB_REPOSITORY+'/git/blobs',{method:'POST',headers:{Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},body:JSON.stringify({content:bytes.toString('base64'),encoding:'base64'})});
       assert.ok(response.ok,'Asset upload failed: '+response.status);
       const result=await response.json();console.log('ASSET_BLOB '+JSON.stringify({path,sha:result.sha,size:bytes.length}));
+      if(path.includes('/preview-')){
+        const review=await fetch('https://api.github.com/repos/'+process.env.GITHUB_REPOSITORY+'/git/blobs',{method:'POST',headers:{Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},body:JSON.stringify({content:bytes.toString('base64'),encoding:'utf-8'})});
+        assert.ok(review.ok,'Review image upload failed: '+review.status);
+        const value=await review.json();console.log('ASSET_REVIEW '+JSON.stringify({path,sha:value.sha}));
+      }
     }
   }
 } finally {await browser?.close();await new Promise(ok=>server.close(ok));}
