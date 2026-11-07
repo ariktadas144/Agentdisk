@@ -1,0 +1,32 @@
+name: Website
+on:
+  pull_request:
+    paths: [docs/**, scripts/check-site.mjs, .github/workflows/site.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    name: Website browser checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      SITE_TOOL_DIR: /tmp/agentdisk-site-tools
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Install isolated browser tools
+        run: npm install --prefix "$SITE_TOOL_DIR" --no-audit --no-fund playwright@1.64.1
+      - name: Install Chromium
+        run: '"$SITE_TOOL_DIR/node_modules/.bin/playwright" install --with-deps chromium'
+      - name: Check the website and render artwork
+        run: node scripts/check-site.mjs
+        env:
+          PUBLISH_PREVIEW_ASSETS: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feat/project-site' && github.event.pull_request.head.repo.full_name == github.repository && '1' || '0' }}
+          GH_TOKEN: ${{ github.token }}
