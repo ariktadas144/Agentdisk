@@ -18,7 +18,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     env:
-      SITE_TOOL_DIR: ${{ runner.temp }}/agentdisk-site-tools
+      SITE_TOOL_DIR: /tmp/agentdisk-site-tools
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
