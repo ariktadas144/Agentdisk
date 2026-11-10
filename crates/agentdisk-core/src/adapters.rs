@@ -207,15 +207,28 @@ pub fn parse_adapter(src: &str) -> Result<Adapter, String> {
                 return Err(format!("path '{pid}': unknown key '{k}'"));
             }
         }
+        let marker = gs("marker");
+        if kind == Kind::Worktree && marker.is_none() {
+            return Err(format!("path '{pid}': kind \"worktree\" needs a 'marker'"));
+        }
+        let platforms = get("platforms").map(TVal::str_list).unwrap_or_default();
+        if let Some(p) = platforms
+            .iter()
+            .find(|p| !matches!(p.as_str(), "windows" | "macos" | "linux"))
+        {
+            return Err(format!(
+                "path '{pid}': unknown platform '{p}' (windows, macos, linux)"
+            ));
+        }
         paths.push(PathEntry {
             id: pid,
             template,
             kind,
             class,
-            marker: gs("marker"),
+            marker,
             documented: get("documented").and_then(TVal::as_bool).unwrap_or(false),
             note: gs("note"),
-            platforms: get("platforms").map(TVal::str_list).unwrap_or_default(),
+            platforms,
         });
     }
     for (k, _) in &doc.top {
@@ -578,6 +591,15 @@ mod tests {
                 .is_err()
         );
         assert!(parse_adapter("id = \"x\"\nid = \"y\"").is_err());
+
+        let path = "id = \"x\"\n[[path]]\nid=\"p\"\npath=\"{home}\"\nclass=\"user-data\"\n";
+        let err = parse_adapter(&format!("{path}platforms = [\"linux\", \"win\"]")).unwrap_err();
+        assert!(err.contains("'p'") && err.contains("'win'"), "{err}");
+        let err = parse_adapter(&format!("{path}kind = \"worktree\"")).unwrap_err();
+        assert!(err.contains("'p'") && err.contains("marker"), "{err}");
+        let ok = parse_adapter(&format!("{path}platforms = [\"linux\"]")).unwrap();
+        assert_eq!(ok.paths[0].platforms, vec!["linux"]);
+        assert!(parse_adapter(&format!("{path}kind = \"worktree\"\nmarker = \"/.x/\"")).is_ok());
     }
 
     #[test]
