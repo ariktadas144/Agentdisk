@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Adapter files are rejected when a path has a `platforms` value other than `windows`, `macos` or `linux`, or has `kind = "worktree"` without a `marker`. Before, such a path was silently never found, or its worktrees were shown as `git`.
+
 ## 0.3.1
 
 ### Security
