@@ -47,7 +47,7 @@ documented = true
 | `{env:VAR\|home/.x}` | value of `VAR`, else the fallback | | |
 | `{repo}` | a repository found while scanning projects (worktrees only) | | |
 
-A path segment of exactly `*` matches every sub-folder. `platforms = ["windows"]` limits a path to some systems.
+A path segment of exactly `*` matches every sub-folder. `platforms = ["windows"]` limits a path to some systems. The allowed values are `windows`, `macos` and `linux`; any other value is an error. A `kind = "worktree"` path must have a `marker`.
 
 ## Classes
 
