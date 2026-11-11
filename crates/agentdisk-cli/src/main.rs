@@ -23,6 +23,7 @@ LOOK (read-only):
     advise      Ways to need less space (shared stores, duplicates, caches)
     check       Fast check of free space and agent worktrees (for hooks)
     adapters    List the agents agentdisk knows and where they keep data
+    plans       List saved cleanup plans and whether they were applied
     quarantine  Show what earlier cleanups moved aside
 
 CLEAN UP (always reversible first):
@@ -306,6 +307,21 @@ fn cmd_plan(rest: &[String]) -> Result<ExitCode, String> {
         println!("{}", cleanup::plan_to_json(&plan).pretty());
     } else {
         print!("{}", cleanup::render_plan(&plan, Some(&path)));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_plans(rest: &[String]) -> Result<ExitCode, String> {
+    let a = parse(rest, &[], &["json"])?;
+    if a.has("help") {
+        println!("agentdisk plans [--json]\n\nRead-only. Lists the saved cleanup plans, newest first, with what each\nwould free and whether it was applied.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let list = cleanup::list_plans();
+    if a.has("json") {
+        println!("{}", cleanup::plans_to_json(&list).pretty());
+    } else {
+        print!("{}", cleanup::render_plans(&list));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -654,6 +670,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         "explain" => cmd_explain(rest),
         "advise" => cmd_advise(rest),
         "plan" => cmd_plan(rest),
+        "plans" => cmd_plans(rest),
         "apply" => cmd_apply(rest),
         "restore" => cmd_restore(rest),
         "purge" => cmd_purge(rest),

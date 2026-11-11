@@ -10,6 +10,7 @@ agentdisk reports disk space used by AI coding agents and dev projects, and make
 - `agentdisk size <dir> [--json]` — one folder; "freed if deleted" counts hardlinks correctly.
 - `agentdisk advise -p <dir>` — ways to need less space (pnpm/uv, duplicates, caches, agent settings).
 - `agentdisk plan -p <dir>` — saves a cleanup plan. Moves nothing.
+- `agentdisk plans [--json]` — read-only list of saved plans: id, size and whether each was applied.
 - MCP: `agentdisk mcp` (stdio) offers the same read-only tools plus `agentdisk_plan`.
 
 ## Rules
