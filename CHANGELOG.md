@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Adapter files are rejected when a path has a `platforms` value other than `windows`, `macos` or `linux`, or has `kind = "worktree"` without a `marker`. Before, such a path was silently never found, or its worktrees were shown as `git`.
-- New: `agentdisk plans [--json]` lists the saved cleanup plans, newest first, with what each would free and whether it is empty, not applied, applied, restored or purged. A plan file that cannot be read is listed as unreadable. Read-only.
+- New: `agentdisk plans [--json]` lists the saved cleanup plans, newest first, with what each would free and whether it is empty, not applied, applied, restored or purged. A plan file that cannot be read is listed as unreadable. Read-only. Thanks to @ariktadas144! (#31, #37)
 
 ## 0.3.1
 
