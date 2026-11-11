@@ -614,6 +614,133 @@ pub fn load(id: &str) -> Result<Plan, String> {
     plan_from_json(&json::parse(&text)?)
 }
 
+/// One saved plan file, as `agentdisk plans` lists it.
+#[derive(Debug, Clone)]
+pub struct PlanSummary {
+    pub id: String,
+    pub created: u64,
+    pub items: usize,
+    pub bytes: u64,
+    /// "empty", "not applied", the journal states ("applied", "restored",
+    /// "purged"; several are joined with ", "), or "unreadable".
+    pub state: String,
+    /// Why the file could not be read.
+    pub error: Option<String>,
+}
+
+fn plan_state(plan: &Plan) -> String {
+    let mut states: Vec<String> = Vec::new();
+    for e in read_journal(&plan.id) {
+        let s = if e.state == "quarantined" {
+            "applied".to_string()
+        } else {
+            e.state
+        };
+        if !states.contains(&s) {
+            states.push(s);
+        }
+    }
+    if !states.is_empty() {
+        states.join(", ")
+    } else if plan.items.is_empty() {
+        "empty".into()
+    } else {
+        "not applied".into()
+    }
+}
+
+/// Every plan file in the plans folder, newest first. Reads only.
+pub fn list_plans() -> Vec<PlanSummary> {
+    let Ok(entries) = fs::read_dir(plans_dir()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PlanSummary> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let id = name.strip_suffix(".json")?.to_string();
+            let plan = fs::read_to_string(e.path())
+                .map_err(|e| e.to_string())
+                .and_then(|t| json::parse(&t))
+                .and_then(|v| plan_from_json(&v));
+            Some(match plan {
+                Ok(p) => PlanSummary {
+                    id,
+                    created: p.created,
+                    items: p.items.len(),
+                    bytes: p.total(),
+                    state: plan_state(&p),
+                    error: None,
+                },
+                Err(e) => PlanSummary {
+                    id,
+                    created: 0,
+                    items: 0,
+                    bytes: 0,
+                    state: "unreadable".into(),
+                    error: Some(e),
+                },
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| (b.created, &b.id).cmp(&(a.created, &a.id)));
+    out
+}
+
+pub fn plans_to_json(plans: &[PlanSummary]) -> Value {
+    let list = plans
+        .iter()
+        .map(|p| {
+            Value::obj(vec![
+                ("id", p.id.as_str().into()),
+                ("created", p.created.into()),
+                ("items", p.items.into()),
+                ("total_bytes", p.bytes.into()),
+                ("state", p.state.as_str().into()),
+                ("error", p.error.clone().into()),
+            ])
+        })
+        .collect::<Vec<_>>();
+    Value::obj(vec![
+        ("schema_version", 1u64.into()),
+        ("plans", list.into()),
+    ])
+}
+
+pub fn render_plans(plans: &[PlanSummary]) -> String {
+    if plans.is_empty() {
+        return "No saved plans. Make one with: agentdisk plan\n".into();
+    }
+    let now = size::now_secs();
+    let rows: Vec<Vec<String>> = plans
+        .iter()
+        .map(|p| {
+            if let Some(e) = &p.error {
+                let q = || "?".to_string();
+                return vec![p.id.clone(), q(), q(), q(), format!("unreadable: {e}")];
+            }
+            let created = (p.created > 0).then(|| now.saturating_sub(p.created) / 86_400);
+            let state = if p.state.split(", ").any(|s| s == "applied") {
+                format!("{} (restore with: agentdisk restore {})", p.state, p.id)
+            } else {
+                p.state.clone()
+            };
+            vec![
+                p.id.clone(),
+                util::age(created),
+                p.items.to_string(),
+                human(p.bytes),
+                state,
+            ]
+        })
+        .collect();
+    table(
+        &["Plan", "Created", "Items", "Frees", "State"],
+        &rows,
+        &[2, 3],
+    )
+}
+
 pub fn render_plan(p: &Plan, path: Option<&Path>) -> String {
     let mut out = format!("agentdisk plan {}\n", p.id);
     out.push_str("This is only a plan. Nothing was moved or deleted.\n\n");

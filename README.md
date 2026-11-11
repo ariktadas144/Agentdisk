@@ -69,6 +69,7 @@ On Windows you can run `.\scripts\install.ps1` instead. Check it works: `agentdi
 | `check` | Fast warning when space is low or worktrees pile up (for hooks) | No |
 | `adapters` | Which agents and tools are known, and found here | No |
 | `plan [-p dir]` | Saves a cleanup plan | Writes a plan file |
+| `plans` | Saved plans, newest first, with size and whether they were applied | No |
 | `apply <id>` | Moves plan items to quarantine (asks you for a code) | Moves files |
 | `restore <id>` | Puts them back | Moves files |
 | `purge` | Deletes quarantined items older than 7 days (asks you) | Deletes |
