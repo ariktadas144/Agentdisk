@@ -57,6 +57,27 @@ fn version_and_help() {
 }
 
 #[test]
+fn config_reads_bom_prefixed_file() {
+    let h = tmp("config-bom");
+    let config_dir = h.join("agentdisk");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "\u{feff}worktree_days = 3\n",
+    )
+    .unwrap();
+
+    let (code, out, err) = run(&h, &["config"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("worktree_days = 3, build_days = 14, max_depth = 6"),
+        "{out}"
+    );
+    assert!(!err.contains("unknown key"), "{err}");
+    fs::remove_dir_all(&h).unwrap();
+}
+
+#[test]
 fn scan_finds_fake_agent_data_and_is_read_only() {
     let h = tmp("scan");
     fs::create_dir_all(h.join(".claude/projects/x")).unwrap();

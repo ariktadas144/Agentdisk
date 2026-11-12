@@ -316,6 +316,7 @@ impl TomlDoc {
 }
 
 pub fn parse_toml(src: &str) -> Result<TomlDoc, String> {
+    let src = src.strip_prefix('\u{feff}').unwrap_or(src);
     let mut doc = TomlDoc::default();
     let lines: Vec<&str> = src.lines().collect();
     let mut i = 0;
@@ -579,6 +580,17 @@ mod tests {
         assert_eq!(doc.top_get("c").unwrap().str_list(), vec!["one", "two"]);
         assert_eq!(doc.top_get("n").unwrap().as_int(), Some(1000));
         assert_eq!(doc.tables[0].1[0].1.as_str(), Some("p"));
+    }
+
+    #[test]
+    fn parses_leading_bom_in_toml_and_adapter_files() {
+        let source = "key = \"value\"\n";
+        let plain = parse_toml(source).unwrap();
+        let bom = parse_toml(&format!("\u{feff}{source}")).unwrap();
+        assert_eq!(bom.top, plain.top);
+
+        let adapter = parse_adapter("\u{feff}id = \"example\"\n").unwrap();
+        assert_eq!(adapter.id, "example");
     }
 
     #[test]
