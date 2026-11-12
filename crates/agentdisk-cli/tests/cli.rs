@@ -426,7 +426,13 @@ fn size_and_explain_with_several_folders() {
         let (code, out, err) = call(&[&a, &nope, &b], &[]);
         assert_eq!(code, 1, "{cmd}: {out}{err}");
         assert!(err.contains("nope"), "{cmd}: {err}");
-        assert!(out.contains(&s(&a)) && out.contains(&s(&b)), "{cmd}: {out}");
+        // `explain` prints the canonical path, which can differ from the one
+        // given (short Windows temp names), so match on the folder name.
+        let printed = |n: &str| {
+            out.lines()
+                .any(|l| l.ends_with(&format!("/{n}")) || l.ends_with(&format!("\\{n}")))
+        };
+        assert!(printed("a") && printed("b"), "{cmd}: {out}");
 
         // One missing folder keeps today's behaviour.
         let (code, out, err) = call(&[&nope], &["--json"]);
